@@ -1,12 +1,10 @@
 package com.virjar.sekiro.server.controller;
 
 
-import com.google.common.base.Joiner;
-import com.google.common.collect.Lists;
 import com.virjar.sekiro.api.CommonRes;
 import com.virjar.sekiro.server.netty.ChannelRegistry;
 import com.virjar.sekiro.server.netty.NatClient;
-import com.virjar.sekiro.server.util.CommonUtil;
+import com.virjar.sekiro.server.netty.http.ContentType;
 import com.virjar.sekiro.server.util.ReturnUtil;
 
 import org.apache.commons.io.IOUtils;
@@ -19,13 +17,14 @@ import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.IOException;
-import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import external.com.alibaba.fastjson.JSONObject;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -52,14 +51,32 @@ public class SekiroServerController {
     @RequestMapping(value = "/invoke", method = {RequestMethod.GET, RequestMethod.POST})
     public void invoke(HttpServletRequest httpServletRequest, HttpServletResponse httpServletResponse) throws IOException {
         String contentType = httpServletRequest.getContentType();
-        int timeOut = NumberUtils.toInt(httpServletRequest.getParameter("invoke_timeOut"));
-        String group = httpServletRequest.getParameter("group");
-        String bindClient = httpServletRequest.getParameter("bindClient");
-        String requestBody = CommonUtil.joinParam(httpServletRequest.getParameterMap());
+
+        Map<String, String[]> parameterMap = httpServletRequest.getParameterMap();
+        JSONObject requestJson = new JSONObject();
+        for (Map.Entry<String, String[]> entry : parameterMap.entrySet()) {
+            String[] value = entry.getValue();
+            if (value == null || value.length == 0) {
+                continue;
+            }
+            requestJson.put(entry.getKey(), value[0]);
+        }
         if (httpServletRequest.getMethod().equalsIgnoreCase("post")
-                && StringUtils.containsIgnoreCase(contentType, "application/json;charset=utf8")) {
+                && StringUtils.containsIgnoreCase(contentType, "application/json")) {
+            ContentType contentTypeObject = ContentType.from(contentType);
+
+            assert contentTypeObject != null;
+            String charset = contentTypeObject.getCharset();
+            if (StringUtils.isBlank(charset)) {
+                charset = StandardCharsets.UTF_8.name();
+            }
             try {
-                requestBody = IOUtils.toString(httpServletRequest.getInputStream());
+                String requestJSONBody = IOUtils.toString(httpServletRequest.getInputStream(), charset);
+                JSONObject jsonObject = JSONObject.parseObject(requestJSONBody);
+                for (String key : jsonObject.keySet()) {
+                    requestJson.put(key, jsonObject.get(key));
+                }
+
             } catch (IOException e) {
                 log.error("error for decode http request", e);
                 ReturnUtil.writeRes(httpServletResponse, ReturnUtil.failed(e));
@@ -67,9 +84,25 @@ public class SekiroServerController {
             }
         }
 
-        if (timeOut < 1) {
-            //默认5s的超时时间
-            timeOut = 5000;
+
+        String invokeTimeoutString = requestJson.getString("invoke_timeout");
+        if (StringUtils.isBlank(invokeTimeoutString)) {
+            //正确写法应该是invoke_timeout，由于历史原因存在错别字
+            invokeTimeoutString = requestJson.getString("invoke_timeOut");
+        }
+
+        int timeOut = NumberUtils.toInt(invokeTimeoutString);
+        String group = requestJson.getString("group");
+        String bindClient = requestJson.getString("bindClient");
+
+        if (StringUtils.isBlank(group)) {
+            ReturnUtil.writeRes(httpServletResponse, ReturnUtil.failed("the param {group} not presented"));
+            return;
+        }
+
+        if (timeOut < 500) {
+            //默认15s的超时时间
+            timeOut = 15000;
         }
 
         NatClient natClient;
@@ -86,7 +119,7 @@ public class SekiroServerController {
             ReturnUtil.writeRes(httpServletResponse, ReturnUtil.failed("no device online"));
             return;
         }
-        natClient.forward(requestBody, timeOut, httpServletResponse);
+        natClient.forward(requestJson.toJSONString(), timeOut, httpServletResponse);
     }
 
 
